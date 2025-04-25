@@ -18,6 +18,7 @@ fn main() {
 
         match command_parts[0] {
             "exit" => exit(0),
+            "echo" => println!("{}", input.trim()[4..].trim()),
             _ => println!("{}: command not found", input.trim()),
         }
     }
