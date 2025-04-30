@@ -17,6 +17,7 @@ pub fn parse_command(input: &str) -> Option<Command> {
         "type" => Some(Command::Type(
             parse_command(input.trim()[4..].trim()).map(|sc| Box::new(sc)),
         )),
+        "pwd" => Some(Command::PWD),
         _ => {
             let paths = env::var_os("PATH").unwrap();
             for path in env::split_paths(&paths) {
@@ -37,6 +38,7 @@ pub enum Command {
     Exit,
     Echo(String),
     Type(Option<Box<Command>>),
+    PWD,
     Executable(PathBuf, Vec<String>),
     InvalidCommand(String),
 }
@@ -51,6 +53,7 @@ impl Command {
                     println!("{}", subcommand.as_ref().unwrap().r#type());
                 }
             }
+            Command::PWD => println!("{}", env::current_dir().unwrap().display()),
             Command::Executable(_, args) => {
                 process::Command::new(self.name())
                     .args(args)
@@ -65,7 +68,7 @@ impl Command {
 
     fn r#type(&self) -> String {
         return match self {
-            Command::Echo(..) | Command::Exit | Command::Type(..) => {
+            Command::Echo(..) | Command::Exit | Command::Type(..) | Command::PWD => {
                 format!("{} is a shell builtin", self.name())
             }
             Command::Executable(path, _) => format!("{} is {}", self.name(), path.display()),
@@ -78,6 +81,7 @@ impl Command {
             Command::Exit => "exit",
             Command::Echo(..) => "echo",
             Command::Type(..) => "type",
+            Command::PWD => "pwd",
             Command::Executable(path, _) => path.file_name().unwrap().to_str().unwrap(),
             Command::InvalidCommand(..) => "invalid_command",
         };
