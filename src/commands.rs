@@ -6,7 +6,9 @@ use std::{
 };
 
 pub fn parse_command(input: &str) -> Option<Command> {
-    let command_parts: Vec<&str> = input.trim().split_whitespace().collect();
+    let home = env::var_os("HOME").unwrap();
+    let true_input = input.replace("~", home.to_str().unwrap());
+    let command_parts: Vec<&str> = true_input.trim().split_whitespace().collect();
 
     if command_parts.len() < 1 {
         return None;
@@ -14,12 +16,12 @@ pub fn parse_command(input: &str) -> Option<Command> {
 
     match command_parts[0] {
         "exit" => Some(Command::Exit), // might need the input later to change the exit code
-        "echo" => Some(Command::Echo(input.trim()[4..].trim().to_owned())),
+        "echo" => Some(Command::Echo(true_input.trim()[4..].trim().to_owned())),
         "type" => Some(Command::Type(
-            parse_command(input.trim()[4..].trim()).map(|sc| Box::new(sc)),
+            parse_command(true_input.trim()[4..].trim()).map(|sc| Box::new(sc)),
         )),
         "pwd" => Some(Command::PWD),
-        "cd" => Some(Command::CD(input.trim()[2..].trim().to_owned())),
+        "cd" => Some(Command::CD(true_input.trim()[2..].trim().to_owned())),
         _ => {
             let paths = env::var_os("PATH").unwrap();
             for path in env::split_paths(&paths) {
@@ -31,7 +33,7 @@ pub fn parse_command(input: &str) -> Option<Command> {
                     ));
                 }
             }
-            return Some(Command::InvalidCommand(input.trim().to_owned()));
+            return Some(Command::InvalidCommand(true_input.trim().to_owned()));
         }
     }
 }
