@@ -2,6 +2,7 @@ use std::{
     env,
     path::PathBuf,
     process::{self, exit},
+    str::FromStr,
 };
 
 pub fn parse_command(input: &str) -> Option<Command> {
@@ -18,6 +19,7 @@ pub fn parse_command(input: &str) -> Option<Command> {
             parse_command(input.trim()[4..].trim()).map(|sc| Box::new(sc)),
         )),
         "pwd" => Some(Command::PWD),
+        "cd" => Some(Command::CD(input.trim()[2..].trim().to_owned())),
         _ => {
             let paths = env::var_os("PATH").unwrap();
             for path in env::split_paths(&paths) {
@@ -39,6 +41,7 @@ pub enum Command {
     Echo(String),
     Type(Option<Box<Command>>),
     PWD,
+    CD(String),
     Executable(PathBuf, Vec<String>),
     InvalidCommand(String),
 }
@@ -54,6 +57,23 @@ impl Command {
                 }
             }
             Command::PWD => println!("{}", env::current_dir().unwrap().display()),
+            Command::CD(input) => {
+                if input.split_whitespace().count() > 1 {
+                    println!("{}: too many arguments", self.name());
+                    return;
+                }
+
+                let path = PathBuf::from_str(input).unwrap();
+                if !path.exists() {
+                    println!("{}: {}: No such file or directory", self.name(), input);
+                    return;
+                }
+                if !path.is_dir() {
+                    println!("{}: {}: Not a directory", self.name(), input);
+                    return;
+                }
+                env::set_current_dir(path).unwrap();
+            }
             Command::Executable(_, args) => {
                 process::Command::new(self.name())
                     .args(args)
@@ -68,7 +88,11 @@ impl Command {
 
     fn r#type(&self) -> String {
         return match self {
-            Command::Echo(..) | Command::Exit | Command::Type(..) | Command::PWD => {
+            Command::Echo(..)
+            | Command::Exit
+            | Command::Type(..)
+            | Command::PWD
+            | Command::CD(..) => {
                 format!("{} is a shell builtin", self.name())
             }
             Command::Executable(path, _) => format!("{} is {}", self.name(), path.display()),
@@ -82,6 +106,7 @@ impl Command {
             Command::Echo(..) => "echo",
             Command::Type(..) => "type",
             Command::PWD => "pwd",
+            Command::CD(..) => "cd",
             Command::Executable(path, _) => path.file_name().unwrap().to_str().unwrap(),
             Command::InvalidCommand(..) => "invalid_command",
         };
