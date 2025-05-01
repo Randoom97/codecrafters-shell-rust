@@ -7,16 +7,18 @@ use std::{
 
 pub fn parse_command(input: &str) -> Option<Command> {
     let home = env::var_os("HOME").unwrap();
-    let true_input = input.replace("~", home.to_str().unwrap());
-    let command_parts: Vec<&str> = true_input.trim().split_whitespace().collect();
+    let true_input = quote_aware_replace(input, "~", home.to_str().unwrap());
+    let command_parts = quote_aware_split(&true_input);
 
     if command_parts.len() < 1 {
         return None;
     }
 
-    match command_parts[0] {
+    match command_parts[0].as_str() {
         "exit" => Some(Command::Exit), // might need the input later to change the exit code
-        "echo" => Some(Command::Echo(true_input.trim()[4..].trim().to_owned())),
+        "echo" => Some(Command::Echo(
+            command_parts[1..].iter().map(|s| s.to_owned()).collect(),
+        )),
         "type" => Some(Command::Type(
             parse_command(true_input.trim()[4..].trim()).map(|sc| Box::new(sc)),
         )),
@@ -25,7 +27,7 @@ pub fn parse_command(input: &str) -> Option<Command> {
         _ => {
             let paths = env::var_os("PATH").unwrap();
             for path in env::split_paths(&paths) {
-                let exec_path = path.join(command_parts[0]);
+                let exec_path = path.join(command_parts[0].as_str());
                 if exec_path.is_file() {
                     return Some(Command::Executable(
                         exec_path,
@@ -38,9 +40,54 @@ pub fn parse_command(input: &str) -> Option<Command> {
     }
 }
 
+fn quote_aware_replace(string: &str, pattern: &str, replacement: &str) -> String {
+    let mut output = String::new();
+    let mut section = String::new();
+    let mut in_single_quote = false;
+    for char in string.trim().chars() {
+        section.push(char);
+        if char == '\'' {
+            if in_single_quote {
+                output.push_str(&section);
+            } else {
+                let new_section = section.replace(pattern, replacement);
+                output.push_str(&new_section);
+            }
+            section.clear();
+            in_single_quote = !in_single_quote;
+        }
+    }
+    output.push_str(&section.replace(pattern, replacement));
+    return output;
+}
+
+fn quote_aware_split(string: &str) -> Vec<String> {
+    let mut output: Vec<String> = Vec::new();
+    let mut current_string = String::new();
+    let mut in_single_quote = false;
+    for char in string.trim().chars() {
+        if char == '\'' {
+            in_single_quote = !in_single_quote;
+            continue;
+        }
+        if !in_single_quote && char::is_ascii_whitespace(&char) {
+            if current_string.len() > 0 {
+                output.push(current_string);
+                current_string = String::new();
+            }
+            continue;
+        }
+        current_string.push(char);
+    }
+    if current_string.len() > 0 {
+        output.push(current_string);
+    }
+    return output;
+}
+
 pub enum Command {
     Exit,
-    Echo(String),
+    Echo(Vec<String>),
     Type(Option<Box<Command>>),
     PWD,
     CD(String),
@@ -52,7 +99,7 @@ impl Command {
     pub fn run(&self) {
         match self {
             Command::Exit => exit(0),
-            Command::Echo(input) => println!("{}", input),
+            Command::Echo(args) => println!("{}", args.join(" ")),
             Command::Type(subcommand) => {
                 if subcommand.is_some() {
                     println!("{}", subcommand.as_ref().unwrap().r#type());
