@@ -6,9 +6,7 @@ use std::{
 };
 
 pub fn parse_command(input: &str) -> Option<Command> {
-    let home = env::var_os("HOME").unwrap();
-    let true_input = quote_aware_replace(input, "~", home.to_str().unwrap());
-    let command_parts = quote_aware_split(&true_input);
+    let command_parts = transform_input(input);
 
     if command_parts.len() < 1 {
         return None;
@@ -16,14 +14,15 @@ pub fn parse_command(input: &str) -> Option<Command> {
 
     match command_parts[0].as_str() {
         "exit" => Some(Command::Exit), // might need the input later to change the exit code
-        "echo" => Some(Command::Echo(
-            command_parts[1..].iter().map(|s| s.to_owned()).collect(),
-        )),
+        "echo" => Some(Command::Echo(command_parts[1..].iter().cloned().collect())),
         "type" => Some(Command::Type(
-            parse_command(true_input.trim()[4..].trim()).map(|sc| Box::new(sc)),
+            command_parts[1..]
+                .iter()
+                .map(|cp| parse_command(&cp).unwrap())
+                .collect(),
         )),
         "pwd" => Some(Command::PWD),
-        "cd" => Some(Command::CD(true_input.trim()[2..].trim().to_owned())),
+        "cd" => Some(Command::CD(command_parts[1..].iter().cloned().collect())),
         _ => {
             let paths = env::var_os("PATH").unwrap();
             for path in env::split_paths(&paths) {
@@ -35,49 +34,78 @@ pub fn parse_command(input: &str) -> Option<Command> {
                     ));
                 }
             }
-            return Some(Command::InvalidCommand(true_input.trim().to_owned()));
+            return Some(Command::InvalidCommand(command_parts[0].clone()));
         }
     }
 }
 
-fn quote_aware_replace(string: &str, pattern: &str, replacement: &str) -> String {
-    let mut output = String::new();
-    let mut section = String::new();
-    let mut in_single_quote = false;
-    for char in string.trim().chars() {
-        section.push(char);
-        if char == '\'' {
-            if in_single_quote {
-                output.push_str(&section);
-            } else {
-                let new_section = section.replace(pattern, replacement);
-                output.push_str(&new_section);
-            }
-            section.clear();
-            in_single_quote = !in_single_quote;
-        }
-    }
-    output.push_str(&section.replace(pattern, replacement));
-    return output;
+#[derive(PartialEq)]
+enum QuoteState {
+    None,
+    Single,
+    Double,
 }
 
-fn quote_aware_split(string: &str) -> Vec<String> {
+fn transform_input(input: &str) -> Vec<String> {
+    let home = env::var_os("HOME").unwrap();
+
     let mut output: Vec<String> = Vec::new();
     let mut current_string = String::new();
-    let mut in_single_quote = false;
-    for char in string.trim().chars() {
-        if char == '\'' {
-            in_single_quote = !in_single_quote;
-            continue;
-        }
-        if !in_single_quote && char::is_ascii_whitespace(&char) {
-            if current_string.len() > 0 {
-                output.push(current_string);
-                current_string = String::new();
+    let mut quote_state = QuoteState::None;
+    let mut escaped = false;
+
+    for char in input.trim().chars() {
+        match quote_state {
+            QuoteState::None => {
+                if char::is_ascii_whitespace(&char) {
+                    if current_string.len() > 0 {
+                        output.push(current_string);
+                        current_string = String::new();
+                    }
+                    continue;
+                }
+
+                if escaped {
+                    current_string.push(char);
+                    escaped = false;
+                    continue;
+                }
+
+                match char {
+                    '\'' => quote_state = QuoteState::Single,
+                    '"' => quote_state = QuoteState::Double,
+                    '~' => current_string.push_str(home.to_str().unwrap()),
+                    '\\' => escaped = true,
+                    _ => current_string.push(char),
+                }
             }
-            continue;
+            QuoteState::Single => {
+                if char == '\'' {
+                    quote_state = QuoteState::None;
+                } else {
+                    current_string.push(char);
+                }
+            }
+            QuoteState::Double => {
+                if escaped {
+                    match char {
+                        // fallthrough to adding the char
+                        '"' | '\\' => (),
+                        // need to add the \ because it didn't escape anything
+                        _ => current_string.push('\\'),
+                    }
+                    current_string.push(char);
+                    escaped = false;
+                    continue;
+                }
+
+                match char {
+                    '"' => quote_state = QuoteState::None,
+                    '\\' => escaped = true,
+                    _ => current_string.push(char),
+                }
+            }
         }
-        current_string.push(char);
     }
     if current_string.len() > 0 {
         output.push(current_string);
@@ -88,9 +116,9 @@ fn quote_aware_split(string: &str) -> Vec<String> {
 pub enum Command {
     Exit,
     Echo(Vec<String>),
-    Type(Option<Box<Command>>),
+    Type(Vec<Command>),
     PWD,
-    CD(String),
+    CD(Vec<String>),
     Executable(PathBuf, Vec<String>),
     InvalidCommand(String),
 }
@@ -100,25 +128,30 @@ impl Command {
         match self {
             Command::Exit => exit(0),
             Command::Echo(args) => println!("{}", args.join(" ")),
-            Command::Type(subcommand) => {
-                if subcommand.is_some() {
-                    println!("{}", subcommand.as_ref().unwrap().r#type());
+            Command::Type(commands) => {
+                for command in commands {
+                    println!("{}", command.r#type());
                 }
             }
             Command::PWD => println!("{}", env::current_dir().unwrap().display()),
-            Command::CD(input) => {
-                if input.split_whitespace().count() > 1 {
+            Command::CD(args) => {
+                if args.len() > 2 {
                     println!("{}: too many arguments", self.name());
                     return;
                 }
 
-                let path = PathBuf::from_str(input).unwrap();
+                let path_str = args.get(0).map(|cp| cp.clone()).unwrap_or_else(|| {
+                    let home = env::var_os("HOME").unwrap();
+                    home.into_string().unwrap()
+                });
+
+                let path = PathBuf::from_str(&path_str).unwrap();
                 if !path.exists() {
-                    println!("{}: {}: No such file or directory", self.name(), input);
+                    println!("{}: {}: No such file or directory", self.name(), path_str);
                     return;
                 }
                 if !path.is_dir() {
-                    println!("{}: {}: Not a directory", self.name(), input);
+                    println!("{}: {}: Not a directory", self.name(), path_str);
                     return;
                 }
                 env::set_current_dir(path).unwrap();
