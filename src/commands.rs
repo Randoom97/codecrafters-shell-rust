@@ -57,17 +57,17 @@ fn transform_input(input: &str) -> Vec<String> {
     for char in input.trim().chars() {
         match quote_state {
             QuoteState::None => {
+                if escaped {
+                    current_string.push(char);
+                    escaped = false;
+                    continue;
+                }
+
                 if char::is_ascii_whitespace(&char) {
                     if current_string.len() > 0 {
                         output.push(current_string);
                         current_string = String::new();
                     }
-                    continue;
-                }
-
-                if escaped {
-                    current_string.push(char);
-                    escaped = false;
                     continue;
                 }
 
