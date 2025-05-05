@@ -16,7 +16,7 @@ fn main() {
 
         let command = parse_command(&input);
         if command.is_some() {
-            command.unwrap().run();
+            command.unwrap().run(&mut None);
         }
     }
 }

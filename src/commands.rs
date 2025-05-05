@@ -1,42 +1,64 @@
 use std::{
     env,
+    fs::File,
+    io::{self, Write},
     path::PathBuf,
     process::{self, exit},
     str::FromStr,
 };
 
 pub fn parse_command(input: &str) -> Option<Command> {
-    let command_parts = transform_input(input);
+    let mut command_parts = transform_input(input);
 
     if command_parts.len() < 1 {
         return None;
     }
 
-    match command_parts[0].as_str() {
-        "exit" => Some(Command::Exit), // might need the input later to change the exit code
-        "echo" => Some(Command::Echo(command_parts[1..].iter().cloned().collect())),
-        "type" => Some(Command::Type(
+    let mut redirect_file = None;
+    let redirect_index = command_parts
+        .iter()
+        .position(|cp| *cp == ">" || *cp == "1>");
+    if redirect_index.is_some() {
+        redirect_file = command_parts.get(redirect_index.unwrap() + 1).cloned();
+        command_parts.truncate(redirect_index.unwrap());
+    }
+
+    let command: Command = match command_parts[0].as_str() {
+        "exit" => Command::Exit, // might need the input later to change the exit code
+        "echo" => Command::Echo(command_parts[1..].iter().cloned().collect()),
+        "type" => Command::Type(
             command_parts[1..]
                 .iter()
                 .map(|cp| parse_command(&cp).unwrap())
                 .collect(),
-        )),
-        "pwd" => Some(Command::PWD),
-        "cd" => Some(Command::CD(command_parts[1..].iter().cloned().collect())),
+        ),
+        "pwd" => Command::PWD,
+        "cd" => Command::CD(command_parts[1..].iter().cloned().collect()),
         _ => {
             let paths = env::var_os("PATH").unwrap();
+            let mut found_command = None;
             for path in env::split_paths(&paths) {
                 let exec_path = path.join(command_parts[0].as_str());
                 if exec_path.is_file() {
-                    return Some(Command::Executable(
+                    found_command = Some(Command::Executable(
                         exec_path,
                         command_parts[1..].iter().map(|s| s.to_string()).collect(),
                     ));
+                    break;
                 }
             }
-            return Some(Command::InvalidCommand(command_parts[0].clone()));
+            found_command.unwrap_or_else(|| Command::InvalidCommand(command_parts[0].clone()))
         }
+    };
+
+    if redirect_index.is_some() {
+        return Some(Command::Redirect(
+            redirect_file.unwrap().clone(),
+            Box::new(command),
+        ));
     }
+
+    return Some(command);
 }
 
 #[derive(PartialEq)]
@@ -121,22 +143,28 @@ pub enum Command {
     CD(Vec<String>),
     Executable(PathBuf, Vec<String>),
     InvalidCommand(String),
+    Redirect(String, Box<Command>),
 }
 
 impl Command {
-    pub fn run(&self) {
+    pub fn run(&self, output_file: &mut Option<File>) {
+        let out: &mut dyn Write = if output_file.is_some() {
+            output_file.as_mut().unwrap()
+        } else {
+            &mut io::stdout()
+        };
         match self {
             Command::Exit => exit(0),
-            Command::Echo(args) => println!("{}", args.join(" ")),
+            Command::Echo(args) => writeln!(out, "{}", args.join(" ")).unwrap(),
             Command::Type(commands) => {
                 for command in commands {
-                    println!("{}", command.r#type());
+                    writeln!(out, "{}", command.r#type()).unwrap();
                 }
             }
-            Command::PWD => println!("{}", env::current_dir().unwrap().display()),
+            Command::PWD => writeln!(out, "{}", env::current_dir().unwrap().display()).unwrap(),
             Command::CD(args) => {
                 if args.len() > 2 {
-                    println!("{}: too many arguments", self.name());
+                    writeln!(out, "{}: too many arguments", self.name()).unwrap();
                     return;
                 }
 
@@ -147,24 +175,36 @@ impl Command {
 
                 let path = PathBuf::from_str(&path_str).unwrap();
                 if !path.exists() {
-                    println!("{}: {}: No such file or directory", self.name(), path_str);
+                    writeln!(
+                        out,
+                        "{}: {}: No such file or directory",
+                        self.name(),
+                        path_str
+                    )
+                    .unwrap();
                     return;
                 }
                 if !path.is_dir() {
-                    println!("{}: {}: Not a directory", self.name(), path_str);
+                    writeln!(out, "{}: {}: Not a directory", self.name(), path_str).unwrap();
                     return;
                 }
                 env::set_current_dir(path).unwrap();
             }
             Command::Executable(_, args) => {
-                process::Command::new(self.name())
-                    .args(args)
-                    .spawn()
-                    .unwrap()
-                    .wait()
-                    .unwrap();
+                let mut command = process::Command::new(self.name());
+                command.args(args);
+                if output_file.is_some() {
+                    command.stdout(output_file.as_ref().unwrap().try_clone().unwrap());
+                }
+                command.spawn().unwrap().wait().unwrap();
             }
-            Command::InvalidCommand(input) => println!("{}: command not found", input.trim()),
+            Command::InvalidCommand(input) => {
+                writeln!(out, "{}: command not found", input.trim()).unwrap()
+            }
+            Command::Redirect(file, command) => {
+                let output_file = File::create(file).unwrap();
+                command.run(&mut Some(output_file));
+            }
         }
     }
 
@@ -179,6 +219,7 @@ impl Command {
             }
             Command::Executable(path, _) => format!("{} is {}", self.name(), path.display()),
             Command::InvalidCommand(input) => format!("{}: not found", input.trim()),
+            _ => panic!("Invalid command for type!"),
         };
     }
 
@@ -191,6 +232,7 @@ impl Command {
             Command::CD(..) => "cd",
             Command::Executable(path, _) => path.file_name().unwrap().to_str().unwrap(),
             Command::InvalidCommand(..) => "invalid_command",
+            _ => panic!("Invalid command for name!"),
         };
     }
 }
