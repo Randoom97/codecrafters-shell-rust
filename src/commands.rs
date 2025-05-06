@@ -1,6 +1,6 @@
 use std::{
     env,
-    fs::File,
+    fs::{File, OpenOptions},
     io::{self, Write},
     path::PathBuf,
     process::{self, exit},
@@ -14,22 +14,28 @@ pub fn parse_command(input: &str) -> Option<Command> {
         return None;
     }
 
-    let out_redirect_index = command_parts
-        .iter()
-        .position(|cp| *cp == ">" || *cp == "1>");
-    let err_redirect_index = command_parts.iter().position(|cp| *cp == "2>");
-
-    let mut out_path = None;
-    let mut err_path = None;
-
-    if out_redirect_index.is_some() {
-        command_parts.remove(out_redirect_index.unwrap());
-        out_path = Some(command_parts.remove(out_redirect_index.unwrap()));
+    let mut out_path = RedirectType::None;
+    let mut err_path = RedirectType::None;
+    let mut keep = Vec::new();
+    let mut keep_next = true;
+    for (i, command_part) in command_parts.iter().enumerate() {
+        let next = command_parts.get(i + 1);
+        match command_part.as_str() {
+            ">" | "1>" => out_path = RedirectType::Truncate(next.unwrap().clone()),
+            ">>" | "1>>" => out_path = RedirectType::Append(next.unwrap().clone()),
+            "2>" => err_path = RedirectType::Truncate(next.unwrap().clone()),
+            "2>>" => err_path = RedirectType::Append(next.unwrap().clone()),
+            _ => {
+                keep.push(keep_next);
+                keep_next = true;
+                continue;
+            }
+        }
+        keep.push(false);
+        keep_next = false;
     }
-    if err_redirect_index.is_some() {
-        command_parts.remove(err_redirect_index.unwrap());
-        err_path = Some(command_parts.remove(err_redirect_index.unwrap()));
-    }
+    let mut keep_iter = keep.iter();
+    command_parts.retain(|_| *keep_iter.next().unwrap());
 
     let command: Command = match command_parts[0].as_str() {
         "exit" => Command::Exit, // might need the input later to change the exit code
@@ -140,6 +146,35 @@ fn transform_input(input: &str) -> Vec<String> {
     return output;
 }
 
+pub enum RedirectType {
+    None,
+    Truncate(String),
+    Append(String),
+}
+
+impl RedirectType {
+    pub fn is_some(&self) -> bool {
+        match self {
+            RedirectType::None => false,
+            _ => true,
+        }
+    }
+
+    pub fn as_file(&self) -> Option<File> {
+        match self {
+            RedirectType::None => None,
+            RedirectType::Truncate(path) => Some(File::create(path).unwrap()),
+            RedirectType::Append(path) => Some(
+                OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(path)
+                    .unwrap(),
+            ),
+        }
+    }
+}
+
 pub enum Command {
     Exit,
     Echo(Vec<String>),
@@ -148,7 +183,7 @@ pub enum Command {
     CD(Vec<String>),
     Executable(PathBuf, Vec<String>),
     InvalidCommand(String),
-    Redirect(Option<String>, Option<String>, Box<Command>),
+    Redirect(RedirectType, RedirectType, Box<Command>),
 }
 
 impl Command {
@@ -216,8 +251,8 @@ impl Command {
                 writeln!(err, "{}: command not found", input.trim()).unwrap()
             }
             Command::Redirect(out_path, err_path, command) => {
-                let mut out_file = out_path.as_ref().map(|op| File::create(op).unwrap());
-                let mut err_file = err_path.as_ref().map(|ep| File::create(ep).unwrap());
+                let mut out_file = out_path.as_file();
+                let mut err_file = err_path.as_file();
                 command.run(&mut out_file, &mut err_file);
             }
         }
