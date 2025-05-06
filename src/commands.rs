@@ -14,13 +14,21 @@ pub fn parse_command(input: &str) -> Option<Command> {
         return None;
     }
 
-    let mut redirect_file = None;
-    let redirect_index = command_parts
+    let out_redirect_index = command_parts
         .iter()
         .position(|cp| *cp == ">" || *cp == "1>");
-    if redirect_index.is_some() {
-        redirect_file = command_parts.get(redirect_index.unwrap() + 1).cloned();
-        command_parts.truncate(redirect_index.unwrap());
+    let err_redirect_index = command_parts.iter().position(|cp| *cp == "2>");
+
+    let mut out_path = None;
+    let mut err_path = None;
+
+    if out_redirect_index.is_some() {
+        command_parts.remove(out_redirect_index.unwrap());
+        out_path = Some(command_parts.remove(out_redirect_index.unwrap()));
+    }
+    if err_redirect_index.is_some() {
+        command_parts.remove(err_redirect_index.unwrap());
+        err_path = Some(command_parts.remove(err_redirect_index.unwrap()));
     }
 
     let command: Command = match command_parts[0].as_str() {
@@ -51,11 +59,8 @@ pub fn parse_command(input: &str) -> Option<Command> {
         }
     };
 
-    if redirect_index.is_some() {
-        return Some(Command::Redirect(
-            redirect_file.unwrap().clone(),
-            Box::new(command),
-        ));
+    if out_path.is_some() || err_path.is_some() {
+        return Some(Command::Redirect(out_path, err_path, Box::new(command)));
     }
 
     return Some(command);
@@ -143,16 +148,22 @@ pub enum Command {
     CD(Vec<String>),
     Executable(PathBuf, Vec<String>),
     InvalidCommand(String),
-    Redirect(String, Box<Command>),
+    Redirect(Option<String>, Option<String>, Box<Command>),
 }
 
 impl Command {
-    pub fn run(&self, output_file: &mut Option<File>) {
-        let out: &mut dyn Write = if output_file.is_some() {
-            output_file.as_mut().unwrap()
+    pub fn run(&self, out_file: &mut Option<File>, err_file: &mut Option<File>) {
+        let out: &mut dyn Write = if out_file.is_some() {
+            out_file.as_mut().unwrap()
         } else {
             &mut io::stdout()
         };
+        let err: &mut dyn Write = if err_file.is_some() {
+            err_file.as_mut().unwrap()
+        } else {
+            &mut io::stderr()
+        };
+
         match self {
             Command::Exit => exit(0),
             Command::Echo(args) => writeln!(out, "{}", args.join(" ")).unwrap(),
@@ -164,7 +175,7 @@ impl Command {
             Command::PWD => writeln!(out, "{}", env::current_dir().unwrap().display()).unwrap(),
             Command::CD(args) => {
                 if args.len() > 2 {
-                    writeln!(out, "{}: too many arguments", self.name()).unwrap();
+                    writeln!(err, "{}: too many arguments", self.name()).unwrap();
                     return;
                 }
 
@@ -176,7 +187,7 @@ impl Command {
                 let path = PathBuf::from_str(&path_str).unwrap();
                 if !path.exists() {
                     writeln!(
-                        out,
+                        err,
                         "{}: {}: No such file or directory",
                         self.name(),
                         path_str
@@ -185,7 +196,7 @@ impl Command {
                     return;
                 }
                 if !path.is_dir() {
-                    writeln!(out, "{}: {}: Not a directory", self.name(), path_str).unwrap();
+                    writeln!(err, "{}: {}: Not a directory", self.name(), path_str).unwrap();
                     return;
                 }
                 env::set_current_dir(path).unwrap();
@@ -193,17 +204,21 @@ impl Command {
             Command::Executable(_, args) => {
                 let mut command = process::Command::new(self.name());
                 command.args(args);
-                if output_file.is_some() {
-                    command.stdout(output_file.as_ref().unwrap().try_clone().unwrap());
+                if out_file.is_some() {
+                    command.stdout(out_file.as_ref().unwrap().try_clone().unwrap());
+                }
+                if err_file.is_some() {
+                    command.stderr(err_file.as_ref().unwrap().try_clone().unwrap());
                 }
                 command.spawn().unwrap().wait().unwrap();
             }
             Command::InvalidCommand(input) => {
-                writeln!(out, "{}: command not found", input.trim()).unwrap()
+                writeln!(err, "{}: command not found", input.trim()).unwrap()
             }
-            Command::Redirect(file, command) => {
-                let output_file = File::create(file).unwrap();
-                command.run(&mut Some(output_file));
+            Command::Redirect(out_path, err_path, command) => {
+                let mut out_file = out_path.as_ref().map(|op| File::create(op).unwrap());
+                let mut err_file = err_path.as_ref().map(|ep| File::create(ep).unwrap());
+                command.run(&mut out_file, &mut err_file);
             }
         }
     }
