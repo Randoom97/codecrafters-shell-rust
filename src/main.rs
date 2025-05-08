@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use commands::parse_command;
 
 mod commands;
+mod parser;
 
 fn main() {
     loop {
@@ -14,7 +15,7 @@ fn main() {
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap();
 
-        let command = parse_command(&input);
+        let command = parser::parse_command(&input);
         if command.is_some() {
             command.unwrap().run(&mut None, &mut None);
         }
