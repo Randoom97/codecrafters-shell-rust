@@ -3,7 +3,7 @@ use std::{
     fs::File,
     io::Write,
     path::PathBuf,
-    process::{self, exit, Stdio},
+    process::{exit, Stdio},
     str::FromStr,
 };
 
@@ -25,25 +25,31 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn run(&self) {
-        self.run_with_io(&mut IO::Default, &mut IO::Default, &mut IO::Default)
-            .wait();
+    pub async fn run(&self) {
+        self.run_with_io(IO::Default, IO::Default, IO::Default)
+            .await
+            .wait()
+            .await;
     }
 
     /** Runs a command with the given io (in, out, err). Returns a run result to be waited on. */
-    fn run_with_io(&self, iin: &mut IO, out: &mut IO, err: &mut IO) -> RunResult {
+    async fn run_with_io(&self, mut iin: IO, mut out: IO, mut err: IO) -> RunResult {
         match self {
             Command::Exit => exit(0),
-            Command::Echo(args) => out.writeln(args.join(" ")),
+            Command::Echo(args) => out.writeln(args.join(" ")).await,
             Command::Type(commands) => {
                 for command in commands {
-                    out.writeln(command.r#type());
+                    out.writeln(command.r#type()).await;
                 }
             }
-            Command::PWD => out.writeln(env::current_dir().unwrap().display().to_string()),
+            Command::PWD => {
+                out.writeln(env::current_dir().unwrap().display().to_string())
+                    .await
+            }
             Command::CD(args) => {
                 if args.len() > 2 {
-                    err.writeln(format!("{}: too many arguments", self.name()));
+                    err.writeln(format!("{}: too many arguments", self.name()))
+                        .await;
                     return RunResult::None;
                 }
 
@@ -58,17 +64,19 @@ impl Command {
                         "{}: {}: No such file or directory",
                         self.name(),
                         path_str
-                    ));
+                    ))
+                    .await;
                     return RunResult::None;
                 }
                 if !path.is_dir() {
-                    err.writeln(format!("{}: {}: Not a directory", self.name(), path_str));
+                    err.writeln(format!("{}: {}: Not a directory", self.name(), path_str))
+                        .await;
                     return RunResult::None;
                 }
                 env::set_current_dir(path).unwrap();
             }
             Command::Executable(_, args) => {
-                let mut pcommand = process::Command::new(self.name());
+                let mut pcommand = tokio::process::Command::new(self.name());
                 // let mut pcommand = process::Command::new(self.name());
                 pcommand
                     .args(args)
@@ -79,21 +87,28 @@ impl Command {
                 return RunResult::Child(child);
             }
             Command::InvalidCommand(input) => {
-                err.writeln(format!("{}: command not found", input.trim()));
+                err.writeln(format!("{}: command not found", input.trim()))
+                    .await;
             }
             Command::Pipe(left_command, right_command) => {
                 let (sender, receiver) = tokio::net::unix::pipe::pipe().unwrap();
-                let mut pipe = IO::Pipe(Some(sender), Some(receiver));
-                let mut left_child = left_command.run_with_io(iin, &mut pipe, err);
-                let mut right_child = right_command.run_with_io(&mut pipe, out, err);
+                let out_pipe = IO::Pipe(Some(sender), None);
+                let in_pipe = IO::Pipe(None, Some(receiver));
+                let mut left_child =
+                    Box::pin(left_command.run_with_io(iin, out_pipe, err.clone())).await;
+                let mut right_child = Box::pin(right_command.run_with_io(in_pipe, out, err)).await;
 
-                left_child.wait();
-                right_child.wait();
+                // important to spawn the children before awaiting to avoid blocking the data passing through the pipe
+                left_child.wait().await;
+                right_child.wait().await;
             }
             Command::Redirect(out_path, err_path, command) => {
-                let mut out = out_path.as_io();
-                let mut err = err_path.as_io();
-                command.run_with_io(iin, &mut out, &mut err).wait();
+                let out = out_path.as_io();
+                let err = err_path.as_io();
+                Box::pin(command.run_with_io(iin, out, err))
+                    .await
+                    .wait()
+                    .await;
             }
         }
         return RunResult::None;
@@ -130,15 +145,15 @@ impl Command {
 
 enum RunResult {
     None,
-    Child(process::Child),
+    Child(tokio::process::Child),
 }
 
 impl RunResult {
-    pub fn wait(&mut self) {
+    pub async fn wait(&mut self) {
         match self {
             RunResult::None => {}
             RunResult::Child(child) => {
-                child.wait().unwrap();
+                child.wait().await.unwrap();
             }
         }
     }
@@ -151,15 +166,16 @@ pub enum IO {
 }
 
 impl IO {
-    pub fn writeln(&mut self, data: String) {
-        self.write(data + "\r\n");
+    pub async fn writeln(&mut self, data: String) {
+        self.write(data + "\n").await;
     }
 
-    pub fn write(&mut self, data: String) {
+    pub async fn write(&mut self, data: String) {
         match self {
             IO::Default => print!("{}", data),
             IO::File(file) => write!(file, "{}", data).unwrap(),
             IO::Pipe(sender, _) => {
+                sender.as_ref().unwrap().writable().await.unwrap();
                 sender.as_ref().unwrap().try_write(data.as_bytes()).unwrap();
             }
         }
@@ -180,6 +196,16 @@ impl IO {
             IO::File(file) => file.try_clone().unwrap().into(),
             // take is really awkward, but the resulting Stdio has to be owned, and into_blocking_fd() can't be used on a reference
             IO::Pipe(sender, _) => sender.take().unwrap().into_blocking_fd().unwrap().into(),
+        }
+    }
+}
+
+impl Clone for IO {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Default => Self::Default,
+            Self::File(file) => Self::File(file.try_clone().unwrap()),
+            Self::Pipe(..) => panic!("Can't clone a pipe"),
         }
     }
 }

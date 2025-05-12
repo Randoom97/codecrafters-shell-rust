@@ -16,7 +16,7 @@ async fn main() {
 
         let command = parser::parse_input(&input);
         if command.is_some() {
-            command.unwrap().run();
+            command.unwrap().run().await;
         }
     }
 }
