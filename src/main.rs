@@ -5,7 +5,8 @@ use rustyline::config::Configurer;
 mod commands;
 mod parser;
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
     let mut editor = rustyline::Editor::new().unwrap();
     editor.set_helper(Some(Completer::new()));
     editor.set_completion_type(rustyline::CompletionType::List);
@@ -13,9 +14,9 @@ fn main() {
     loop {
         let input = editor.readline("$ ").unwrap();
 
-        let command = parser::parse_command(&input);
+        let command = parser::parse_input(&input);
         if command.is_some() {
-            command.unwrap().run(&mut None, &mut None);
+            command.unwrap().run();
         }
     }
 }

@@ -3,15 +3,15 @@ use std::{
     fs::{File, OpenOptions},
 };
 
-use crate::commands::Command;
+use crate::commands::{Command, IO};
 
-pub fn parse_command(input: &str) -> Option<Command> {
+pub fn parse_input(input: &str) -> Option<Command> {
     let mut command_parts = transform_input(input);
 
-    if command_parts.len() < 1 {
-        return None;
-    }
+    return parse_redirect(&mut command_parts);
+}
 
+fn parse_redirect(command_parts: &mut Vec<String>) -> Option<Command> {
     let mut out_path = RedirectType::None;
     let mut err_path = RedirectType::None;
     let mut keep = Vec::new();
@@ -35,13 +35,45 @@ pub fn parse_command(input: &str) -> Option<Command> {
     let mut keep_iter = keep.iter();
     command_parts.retain(|_| *keep_iter.next().unwrap());
 
-    let command: Command = match command_parts[0].as_str() {
+    let command = parse_pipe(command_parts);
+
+    if out_path.is_some() || err_path.is_some() {
+        return Some(Command::Redirect(
+            out_path,
+            err_path,
+            Box::new(command.unwrap()),
+        ));
+    }
+    return command;
+}
+
+fn parse_pipe(command_parts: &mut Vec<String>) -> Option<Command> {
+    let pipe_index = command_parts.iter().rposition(|cp| cp == "|");
+    if pipe_index.is_some() {
+        let (left, right) = command_parts.split_at(pipe_index.unwrap());
+        let left_command = parse_pipe(&mut left.iter().cloned().collect()).unwrap();
+        let right_command = parse_command(&right[1..].iter().cloned().collect()).unwrap();
+        return Some(Command::Pipe(
+            Box::new(left_command),
+            Box::new(right_command),
+        ));
+    }
+
+    return parse_command(command_parts);
+}
+
+fn parse_command(command_parts: &Vec<String>) -> Option<Command> {
+    if command_parts.len() < 1 {
+        return None;
+    }
+
+    return Some(match command_parts[0].as_str() {
         "exit" => Command::Exit, // might need the input later to change the exit code
         "echo" => Command::Echo(command_parts[1..].iter().cloned().collect()),
         "type" => Command::Type(
             command_parts[1..]
                 .iter()
-                .map(|cp| parse_command(&cp).unwrap())
+                .map(|cp| parse_command(&vec![cp.clone()]).unwrap())
                 .collect(),
         ),
         "pwd" => Command::PWD,
@@ -54,22 +86,17 @@ pub fn parse_command(input: &str) -> Option<Command> {
                 if exec_path.is_file() {
                     found_command = Some(Command::Executable(
                         exec_path,
-                        command_parts[1..].iter().map(|s| s.to_string()).collect(),
+                        command_parts[1..].iter().cloned().collect(),
                     ));
                     break;
                 }
             }
             found_command.unwrap_or_else(|| Command::InvalidCommand(command_parts[0].clone()))
         }
-    };
-
-    if out_path.is_some() || err_path.is_some() {
-        return Some(Command::Redirect(out_path, err_path, Box::new(command)));
-    }
-
-    return Some(command);
+    });
 }
 
+#[derive(Debug)]
 pub enum RedirectType {
     None,
     Truncate(String),
@@ -84,11 +111,11 @@ impl RedirectType {
         }
     }
 
-    pub fn as_file(&self) -> Option<File> {
+    pub fn as_io(&self) -> IO {
         match self {
-            RedirectType::None => None,
-            RedirectType::Truncate(path) => Some(File::create(path).unwrap()),
-            RedirectType::Append(path) => Some(
+            RedirectType::None => IO::Default,
+            RedirectType::Truncate(path) => IO::File(File::create(path).unwrap()),
+            RedirectType::Append(path) => IO::File(
                 OpenOptions::new()
                     .append(true)
                     .create(true)
